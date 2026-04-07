@@ -4,18 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       openwrt_kernel:
-        description: "内核版本系列"
+        description: "内核版本 (完整版本号，如 6.6.132)"
         required: true
-        default: "6.6.y"
-        type: choice
-        options:
-          - "6.6.y"
-          - "6.12.y"
-          - "6.18.y"
+        default: "6.6.132"
+        type: string
       auto_kernel:
-        description: "自动使用该系列最新内核（如果未指定kernel_tags）"
+        description: "自动使用最新内核 (若false则使用上方指定版本)"
         required: false
-        default: true
+        default: false
         type: boolean
 
 env:
@@ -24,6 +20,7 @@ env:
   NETWORK: dhcp
 
 jobs:
+  # 解析设备列表
   prepare-matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -41,6 +38,7 @@ jobs:
                     jq -R . | jq -cs .)
           echo "matrix={\"device\":$DEVICES}" >> $GITHUB_OUTPUT
 
+  # 并行打包所有设备
   build-all:
     needs: prepare-matrix
     runs-on: ubuntu-22.04
@@ -69,34 +67,14 @@ jobs:
           fi
           echo "file=$ROOTFS_FILE" >> $GITHUB_OUTPUT
 
-      - name: 获取指定内核系列的最新标签
-        id: kernel_tag
-        run: |
-          # 根据用户选择的内核系列（如6.6.y）获取实际可用的内核标签
-          # 这里使用 GitHub API 从 ophub/kernel 仓库获取最新稳定版
-          KERNEL_SERIES="${{ github.event.inputs.openwrt_kernel }}"
-          # 去掉末尾的 .y，例如 6.6.y -> 6.6
-          KERNEL_MAJOR=$(echo "$KERNEL_SERIES" | sed 's/\.y$//')
-          # 获取该系列最新的标签（例如 6.6.132）
-          LATEST_TAG=$(curl -s "https://api.github.com/repos/ophub/kernel/tags" | \
-                       jq -r ".[].name" | \
-                       grep -E "^$KERNEL_MAJOR\.[0-9]+$" | \
-                       sort -V | tail -n1)
-          if [ -z "$LATEST_TAG" ]; then
-            # 如果获取失败，使用一个已知可用的标签
-            LATEST_TAG="6.6.132"
-          fi
-          echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
-          echo "使用内核标签: $LATEST_TAG"
-
       - name: 打包固件 for ${{ matrix.device }}
         uses: ophub/amlogic-s9xxx-openwrt@main
         with:
           openwrt_path: ${{ steps.find_rootfs.outputs.file }}
           openwrt_board: ${{ matrix.device }}
+          # 关键配置：关闭自动内核检测，直接使用 openwrt_kernel 参数
+          auto_kernel: ${{ github.event.inputs.auto_kernel }}
           openwrt_kernel: ${{ github.event.inputs.openwrt_kernel }}
-          auto_kernel: false   # 关闭自动获取，使用下面指定的 kernel_tags
-          kernel_tags: ${{ steps.kernel_tag.outputs.tag }}
           kernel_repo: ophub/kernel
           kernel_usage: stable
           builder_name: kwonelee
