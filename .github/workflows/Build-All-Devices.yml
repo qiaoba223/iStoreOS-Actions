@@ -4,24 +4,29 @@ on:
   workflow_dispatch:
     inputs:
       openwrt_kernel:
-        description: '内核版本'
+        description: "内核版本系列"
         required: true
-        default: '6.6.y'
+        default: "6.6.y"
         type: choice
         options:
-          - '6.6.y'
-          - '6.12.y'
-          - '6.18.y'
+          - "6.6.y"
+          - "6.12.y"
+          - "6.18.y"
       auto_kernel:
-        description: '自动使用最新内核'
+        description: "自动使用该系列最新内核"
         required: false
         default: true
         type: boolean
+      # 以下两个参数固定为 RELEASE 和 dhcp，不再让用户选择，简化操作
+      # openwrt_rootfs 和 network_settings 内部写死
 
 env:
   VERSION: 24.10.5
+  ROOTFS_TYPE: RELEASE
+  NETWORK: dhcp
 
 jobs:
+  # 第一步：从 St2 工作流中解析出所有设备型号
   prepare-matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -30,66 +35,66 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 从 St2 工作流中解析所有设备型号
+      - name: 解析设备列表
         id: set-matrix
         run: |
-          # 提取 St2 文件中 options: 下的所有 - xxxx 行
+          # 提取 St2 文件中 options: 下的所有设备名
           DEVICES=$(grep -A 1000 "options:" .github/workflows/St2_Build-iStoreOS-ib.yml | \
                     grep -E '^\s+- [a-zA-Z0-9_-]+' | \
                     sed 's/^\s+- //' | \
                     jq -R . | jq -cs .)
           echo "matrix={\"device\":$DEVICES}" >> $GITHUB_OUTPUT
 
+  # 第二步：并行打包所有设备
   build-all:
     needs: prepare-matrix
-    runs-on: ubuntu-22.04   # 与 St2 保持一致
+    runs-on: ubuntu-22.04
     strategy:
       matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
-      fail-fast: false
+      fail-fast: false  # 单个设备失败不影响其他设备
     steps:
-      - name: 拉取仓库代码
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: 下载基础 rootfs.tar.gz 包
+      - name: 下载 rootfs.tar.gz
         run: |
-          echo "📦 正在下载 rootfs 包"
+          echo "📦 正在下载预构建 rootfs"
           mkdir -p bin/targets/armsr/armv8
           curl -L -o bin/targets/armsr/armv8/openwrt-armvirt-64-default-rootfs.tar.gz \
-            https://github.com/${{ github.actor }}/iStoreOS-Actions/releases/download/iStoreOS-${{ env.VERSION }}-RELEASE-dhcp/istoreos-armsr-armv8-generic-rootfs.tar.gz
+            https://github.com/${{ github.actor }}/iStoreOS-Actions/releases/download/iStoreOS-${{ env.VERSION }}-${{ env.ROOTFS_TYPE }}-${{ env.NETWORK }}/istoreos-armsr-armv8-generic-rootfs.tar.gz
 
-      - name: 查找 rootfs.tar.gz 文件
+      - name: 查找 rootfs.tar.gz 路径
         id: find_rootfs
         run: |
           ROOTFS_FILE=$(find bin/targets/armsr/armv8/ -type f -name "*rootfs.tar.gz" | head -n1)
-          echo "✅ 找到文件: $ROOTFS_FILE"
+          echo "✅ 找到: $ROOTFS_FILE"
           if [ ! -f "$ROOTFS_FILE" ]; then
             echo "❌ 找不到 rootfs.tar.gz 文件"
             exit 1
           fi
           echo "file=$ROOTFS_FILE" >> $GITHUB_OUTPUT
 
-      - name: 为设备 ${{ matrix.device }} 打包固件
+      - name: 打包固件 for ${{ matrix.device }}
         uses: ophub/amlogic-s9xxx-openwrt@main
         with:
           openwrt_path: ${{ steps.find_rootfs.outputs.file }}
           openwrt_board: ${{ matrix.device }}
           openwrt_kernel: ${{ github.event.inputs.openwrt_kernel }}
           auto_kernel: ${{ github.event.inputs.auto_kernel }}
+          # 关键修复：显式指定内核标签仓库，避免自动获取失败
           kernel_repo: ophub/kernel
           kernel_usage: stable
-          builder_name: kwonelee   # 可选，与 St2 一致
+          builder_name: kwonelee
 
-      - name: 调整 .img.gz 文件名
+      - name: 调整固件文件名
         run: |
           for FILE in ${{ env.PACKAGED_OUTPUTPATH }}/*.img.gz; do
-            echo "处理文件: $FILE"
+            echo "处理: $FILE"
             FILENAME=$(basename "$FILE")
             NEW_FILENAME=$(echo "$FILENAME" | sed "s/openwrt/istoreos_${{ env.VERSION }}/g")
             if [ "$FILENAME" != "$NEW_FILENAME" ]; then
               mv "$FILE" "${{ env.PACKAGED_OUTPUTPATH }}/$NEW_FILENAME"
               echo "已重命名: $FILENAME -> $NEW_FILENAME"
-            else
-              echo "无需重命名: $FILENAME"
             fi
           done
 
